@@ -38,11 +38,11 @@ def parse_args():
     parser.add_argument('-ui', '--unsuper_interval', help='interval for selecting phase points (manifold)',
                         type=int, default=1)
     parser.add_argument('-un', '--unsuper_samples', help='number of samples per phase point (manifold)',
-                        type=int, default=512)
+                        type=int, default=500)
     parser.add_argument('-si', '--super_interval', help='interval for selecting phase points (variational autoencoder)',
                         type=int, default=1)
     parser.add_argument('-sn', '--super_samples', help='number of samples per phase point (variational autoencoder)',
-                        type=int, default=1024)
+                        type=int, default=1000)
     parser.add_argument('-sc', '--scaler', help='feature scaler',
                         type=str, default='minmax')
     parser.add_argument('-ld', '--latent_dimension', help='latent dimension of the variational autoencoder',

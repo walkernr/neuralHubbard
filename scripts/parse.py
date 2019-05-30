@@ -13,7 +13,7 @@ from tqdm import tqdm
 NAME = 'hubbard'
 CWD = os.getcwd()
 DATDIR = CWD+'/data'
-SFL = ['F75', 'F95']
+SFL = ['F90']
 NFL = len(SFL)
 DATFLS = [[DATDIR+'/'+SFL[i]+'/'+f for f in os.listdir(DATDIR+'/'+SFL[i]) if '.dat' in f] for i in range(NFL)]
 NBETA = 25
