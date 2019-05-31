@@ -182,15 +182,15 @@ def build_variational_autoencoder():
         print('building variational autoencoder network')
         print(100*'-')
     # encoder layers
-    input = Input(shape=(NT, NK), name='encoder_input')
-    conv0 = Conv1D(filters=32, kernel_size=3, activation='relu',
-                   kernel_initializer='he_normal', padding='same', strides=1)(input)
-    conv1 = Conv1D(filters=64, kernel_size=3, activation='relu',
-                   kernel_initializer='he_normal', padding='same', strides=2)(conv0)
-    conv2 = Conv1D(filters=32, kernel_size=3, activation='relu',
-                   kernel_initializer='he_normal', padding='same', strides=1)(conv1)
-    conv3 = Conv1D(filters=64, kernel_size=3, activation='relu',
-                   kernel_initializer='he_normal', padding='same', strides=2)(conv2)
+    input = Input(shape=(NT, NKS, NKS), name='encoder_input')
+    conv0 = Conv3D(filters=32, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=(1, 1, 1))(input)
+    conv1 = Conv3D(filters=64, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=(2, 1, 1))(conv0)
+    conv2 = Conv3D(filters=32, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=(1, 1, 1))(conv1)
+    conv3 = Conv3D(filters=64, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=(2, 1, 1))(conv2)
     shape = K.int_shape(conv3)
     fconv3 = Flatten()(conv3)
     d0 = Dense(1024, activation='relu')(fconv3)
@@ -208,15 +208,15 @@ def build_variational_autoencoder():
     latent_input = Input(shape=(LD,), name='z_sampling')
     d1 = Dense(np.prod(shape[1:]), activation='relu')(latent_input)
     rd1 = Reshape(shape[1:])(d1)
-    convt0 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=2)(rd1)
-    convt1 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=1)(convt0)
-    convt2 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=2)(convt1)
-    convt3 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=1)(convt2)
-    output = Conv1DTranspose(filters=NK, kernel_size=3, activation='sigmoid',
+    convt0 = Conv3DTranspose(filters=64, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=(2, 1, 1))(rd1)
+    convt1 = Conv3DTranspose(filters=32, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=(1, 1, 1))(convt0)
+    convt2 = Conv3DTranspose(filters=64, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=(2, 1, 1))(convt1)
+    convt3 = Conv3DTranspose(filters=32, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=(1, 1, 1))(convt2)
+    output = Conv3DTranspose(filters=1, kernel_size=3, activation='sigmoid',
                              kernel_initializer='he_normal', padding='same', name='decoder_output')(convt3)
     # construct decoder
     decoder = Model(latent_input, output, name='decoder')
@@ -288,6 +288,7 @@ if __name__ == '__main__':
      UNI, UNS, SNI, SNS,
      SCLR, LD, MNFLD, CLST, NC,
      BACKEND, OPT, LSS, EP, LR, SEED) = parse_args()
+    NKS = np.int32(np.sqrt(NK))
     if CLST == 'dbscan':
         NCS = '%.0e' % NC
     else:
@@ -319,7 +320,7 @@ if __name__ == '__main__':
     if GPU:
         os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     from keras.models import Model
-    from keras.layers import Input, Lambda, Dense, Conv1D, Conv2D, Conv2DTranspose, Flatten, Reshape
+    from keras.layers import Input, Lambda, Dense, Conv1D, Conv2D, Conv2DTranspose, Conv3D, Conv3DTranspose, Flatten, Reshape
     from Conv1DTranspose import Conv1DTranspose
     from keras.losses import binary_crossentropy, mse
     from keras.optimizers import SGD, Adadelta, Adam, Nadam
@@ -386,21 +387,22 @@ if __name__ == '__main__':
 
     try:
         SCDAT = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%d.dmp.sc.npy' \
-                        % (NAME, NT, NK, SNI, SNS, SCLR, SEED)).reshape(SNFL*SNBETA*SNS, NT, NK)
+                        % (NAME, NT, NK, SNI, SNS, SCLR, SEED)).reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
         if VERBOSE:
             print('scaled selected classification samples loaded from file')
             print(100*'-')
     except:
         CDAT = CDAT[:, :, :, :, :, np.newaxis]
         if SCLR == 'glbl':
-            SCDAT = CDAT.reshape(SNFL*SNBETA*SNS, NT, NK)
-            for i in range(NK):
-                TMIN, TMAX = SCDAT[:, :, :, :, i].min(), SCDAT[:, :, :, :, i].max()
-                SCDAT[:, :, :, :, i] = (SCDAT[:, :, :, :, i]-TMIN)/(TMAX-TMIN)
+            SCDAT = CDAT.reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
+            for i in range(NKS):
+                for j in range(NKS):
+                    TMIN, TMAX = SCDAT[:, :, :, :, i, j].min(), SCDAT[:, :, :, :, i, j].max()
+                    SCDAT[:, :, :, :, i, j] = (SCDAT[:, :, :, :, i, j]-TMIN)/(TMAX-TMIN)
             del TMIN, TMAX
         else:
-            SCDAT = SCLRS[SCLR].fit_transform(CDAT.reshape(SNFL*SNBETA*SNS, NT*NK)).reshape(SNFL*SNBETA*SNS, NT, NK)
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%d.dmp.sc.npy' % (NAME, NT, NK, SNI, SNS, SCLR, SEED), SCDAT.reshape(SNFL, SNBETA, SNS, NT, NK))
+            SCDAT = SCLRS[SCLR].fit_transform(CDAT.reshape(SNFL*SNBETA*SNS, NT*NK)).reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%d.dmp.sc.npy' % (NAME, NT, NK, SNI, SNS, SCLR, SEED), SCDAT.reshape(SNFL, SNBETA, SNS, NT, NKS, NKS))
         if VERBOSE:
             print('scaled selected classification samples computed')
             print(100*'-')
@@ -430,7 +432,7 @@ if __name__ == '__main__':
                           % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), append=True, separator=',')
         LR_DECAY = ReduceLROnPlateau(monitor='val_loss', patience=8, verbose=VERBOSE)
         TRN, VAL = train_test_split(SCDAT, test_size=0.25, shuffle=True)
-        VAE.fit(x=TRN, y=None, validation_data=(VAL, None), epochs=EP, batch_size=SNFL,
+        VAE.fit(x=TRN, y=None, validation_data=(VAL, None), epochs=EP, batch_size=64,
                 shuffle=True, verbose=VERBOSE, callbacks=[CSVLG, LR_DECAY, History()])
         del TRN, VAL
         TLOSS = VAE.history.history['loss']
