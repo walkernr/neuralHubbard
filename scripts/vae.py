@@ -40,11 +40,11 @@ def parse_args():
     parser.add_argument('-ui', '--unsuper_interval', help='interval for selecting phase points (manifold)',
                         type=int, default=1)
     parser.add_argument('-un', '--unsuper_samples', help='number of samples per phase point (manifold)',
-                        type=int, default=500)
+                        type=int, default=1000)
     parser.add_argument('-si', '--super_interval', help='interval for selecting phase points (variational autoencoder)',
                         type=int, default=1)
     parser.add_argument('-sn', '--super_samples', help='number of samples per phase point (variational autoencoder)',
-                        type=int, default=1000)
+                        type=int, default=2000)
     parser.add_argument('-sc', '--scaler', help='feature scaler',
                         type=str, default='none')
     parser.add_argument('-ld', '--latent_dimension', help='latent dimension of the variational autoencoder',
@@ -390,7 +390,7 @@ if __name__ == '__main__':
     if GPU:
         os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     from keras.models import Model
-    from keras.layers import Input, Lambda, Dense, Conv1D, Conv2D, Conv2DTranspose, Conv3D, Conv3DTranspose, Flatten, Reshape
+    from keras.layers import Input, Lambda, Dense, Conv1D, Conv3D, Conv3DTranspose, Flatten, Reshape
     from Conv1DTranspose import Conv1DTranspose
     from keras.losses import binary_crossentropy, mse
     from keras.optimizers import SGD, Adadelta, Adam, Nadam
@@ -475,7 +475,7 @@ if __name__ == '__main__':
             print(100*'-')
     except:
         if SCLR == 'none':
-            SCDAT = CDAT.reshape(*SSHP0)
+            SCDAT = CDAT.reshape(*SSHP1)
         else:
             SCDAT = SCLRS[SCLR].fit_transform(CDAT.reshape(*SSHP2)).reshape(*SSHP1)
         np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%d.dmp.sc.npy' % (NAME, NT, NK, CD, SNI, SNS, SCLR, SEED), SCDAT.reshape(*SSHP0))
@@ -509,7 +509,7 @@ if __name__ == '__main__':
             print(100*'-')
         CSVLG = CSVLogger(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.log.csv'
                           % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), append=True, separator=',')
-        LR_DECAY = ReduceLROnPlateau(monitor='val_loss', patience=8, verbose=VERBOSE)
+        LR_DECAY = ReduceLROnPlateau(monitor='val_loss', patience=4, verbose=VERBOSE)
         TRN, VAL = train_test_split(SCDAT, test_size=0.25, shuffle=True)
         VAE.fit(x=TRN, y=None, validation_data=(VAL, None), epochs=EP, batch_size=64,
                 shuffle=True, verbose=VERBOSE, callbacks=[CSVLG, LR_DECAY, History()])
