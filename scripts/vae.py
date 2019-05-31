@@ -35,6 +35,8 @@ def parse_args():
                         type=int, default=100)
     parser.add_argument('-k', '--kpoints', help='k-point count',
                         type=int, default=16)
+    parser.add_argument('-cd', '--convolution_dimension', help='dimensionality of convolutions (1d or 3d)',
+                        type=int, default=3)
     parser.add_argument('-ui', '--unsuper_interval', help='interval for selecting phase points (manifold)',
                         type=int, default=1)
     parser.add_argument('-un', '--unsuper_samples', help='number of samples per phase point (manifold)',
@@ -44,7 +46,7 @@ def parse_args():
     parser.add_argument('-sn', '--super_samples', help='number of samples per phase point (variational autoencoder)',
                         type=int, default=1000)
     parser.add_argument('-sc', '--scaler', help='feature scaler',
-                        type=str, default='minmax')
+                        type=str, default='none')
     parser.add_argument('-ld', '--latent_dimension', help='latent dimension of the variational autoencoder',
                         type=int, default=8)
     parser.add_argument('-mf', '--manifold', help='manifold learning method',
@@ -67,7 +69,7 @@ def parse_args():
                         type=int, default=256)
     args = parser.parse_args()
     return (args.verbose, args.plot, args.parallel, args.gpu, args.anomaly_detection, args.threads, args.name, args.times, args.kpoints,
-            args.unsuper_interval, args.unsuper_samples, args.super_interval, args.super_samples,
+            args.convolution_dimension, args.unsuper_interval, args.unsuper_samples, args.super_interval, args.super_samples,
             args.scaler, args.latent_dimension, args.manifold, args.clustering,
             args.clusters, args.backend, args.optimizer, args.loss, args.epochs, args.learning_rate, args.random_seed)
 
@@ -85,6 +87,7 @@ def write_specs():
         print('name:                      %s' % NAME)
         print('time slices:               %d' % NT)
         print('k-points:                  %d' % NK)
+        print('conv dim:                  %d' % CD)
         print('random seed:               %d' % SEED)
         print('unsuper interval:          %d' % UNI)
         print('unsuper samples:           %d' % UNS)
@@ -118,6 +121,7 @@ def write_specs():
         out.write('name:                      %s\n' % NAME)
         out.write('time slices:               %d\n' % NT)
         out.write('k-points:                  %d\n' % NK)
+        out.write('conv dim:                  %d\n' % CD)
         out.write('random seed:               %d\n' % SEED)
         out.write('unsuper interval:          %d\n' % UNI)
         out.write('unsuper samples:           %d\n' % UNS)
@@ -177,12 +181,76 @@ def gauss_sampling(beta):
     return z_mean+K.exp(0.5*z_log_var)*epsilon
 
 
-def build_variational_autoencoder():
+def build_variational_autoencoder_1d():
     if VERBOSE:
         print('building variational autoencoder network')
         print(100*'-')
     # encoder layers
-    input = Input(shape=(NT, NKS, NKS), name='encoder_input')
+    input = Input(shape=(NT, NK), name='encoder_input')
+    conv0 = Conv1D(filters=32, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=1)(input)
+    conv1 = Conv1D(filters=64, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=2)(conv0)
+    conv2 = Conv1D(filters=32, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=1)(conv1)
+    conv3 = Conv1D(filters=64, kernel_size=3, activation='relu',
+                   kernel_initializer='he_normal', padding='same', strides=2)(conv2)
+    shape = K.int_shape(conv3)
+    fconv3 = Flatten()(conv3)
+    d0 = Dense(1024, activation='relu')(fconv3)
+    z_mean = Dense(LD, name='z_mean')(d0)
+    z_log_var = Dense(LD, name='z_log_std')(d0) # more numerically stable to use log(var_z)
+    z = Lambda(gauss_sampling, output_shape=(LD,), name='z')([z_mean, z_log_var])
+    # construct encoder
+    encoder = Model(input, [z_mean, z_log_var, z], name='encoder')
+    if VERBOSE:
+        print('encoder network summary')
+        print(100*'-')
+        encoder.summary()
+        print(100*'-')
+    # decoder layers
+    latent_input = Input(shape=(LD,), name='z_sampling')
+    d1 = Dense(np.prod(shape[1:]), activation='relu')(latent_input)
+    rd1 = Reshape(shape[1:])(d1)
+    convt0 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=2)(rd1)
+    convt1 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=1)(convt0)
+    convt2 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=2)(convt1)
+    convt3 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
+                             kernel_initializer='he_normal', padding='same', strides=1)(convt2)
+    output = Conv1DTranspose(filters=NK, kernel_size=3, activation='sigmoid',
+                             kernel_initializer='he_normal', padding='same', name='decoder_output')(convt3)
+    # construct decoder
+    decoder = Model(latent_input, output, name='decoder')
+    if VERBOSE:
+        print('decoder network summary')
+        print(100*'-')
+        decoder.summary()
+        print(100*'-')
+    # construct vae
+    output = decoder(encoder(input)[2])
+    vae = Model(input, output, name='vae_mlp')
+    reconstruction_losses = {'bc': lambda a, b: binary_crossentropy(a, b),
+                             'mse': lambda a, b: mse(a, b)}
+    # vae loss
+    reconstruction_loss = NT*reconstruction_losses[LSS](K.flatten(input), K.flatten(output))
+    kl_loss = -0.5*K.sum(1+z_log_var-K.square(z_mean)-K.exp(z_log_var), axis=-1)
+    vae_loss = K.mean(reconstruction_loss+kl_loss)
+    vae.add_loss(vae_loss)
+    # compile vae
+    vae.compile(optimizer=OPTS[OPT])
+    # return vae networks
+    return encoder, decoder, vae
+
+
+def build_variational_autoencoder_3d():
+    if VERBOSE:
+        print('building variational autoencoder network')
+        print(100*'-')
+    # encoder layers
+    input = Input(shape=(NT, NKS, NKS, 1), name='encoder_input')
     conv0 = Conv3D(filters=32, kernel_size=3, activation='relu',
                    kernel_initializer='he_normal', padding='same', strides=(1, 1, 1))(input)
     conv1 = Conv3D(filters=64, kernel_size=3, activation='relu',
@@ -243,30 +311,33 @@ def build_variational_autoencoder():
 
 def random_selection(dat, intrvl, ns):
     rdat = dat[::intrvl, ::intrvl]
-    ned, nbeta, _, _, _ = rdat.shape
-    idat = np.zeros((ned, nbeta, ns), dtype=np.uint16)
+    if CD == 1:
+        nfl, nbeta, _, _, _ = rdat.shape
+    if CD == 3:
+        nfl, nbeta, _, _, _, _ = rdat.shape
+    idat = np.zeros((nfl, nbeta, ns), dtype=np.uint16)
     if VERBOSE:
         print('selecting random classification samples from full data')
         print(100*'-')
-    for i in tqdm(range(ned), disable=not VERBOSE):
+    for i in tqdm(range(nfl), disable=not VERBOSE):
         for j in tqdm(range(nbeta), disable=not VERBOSE):
                 idat[i, j] = np.random.permutation(rdat[i, j].shape[0])[:ns]
     if VERBOSE:
         print('\n'+100*'-')
-    sldat = np.array([[rdat[i, j, idat[i, j], :, :] for j in range(nbeta)] for i in range(ned)])
+    sldat = np.array([[rdat[i, j, idat[i, j], :, :] for j in range(nbeta)] for i in range(nfl)])
     return sldat
 
 
 def inlier_selection(dat, intrvl, ns):
     rdat = dat[::intrvl, ::intrvl]
-    ned, nbeta, _, _, _ = rdat.shape
+    nfl, nbeta, _, _, _ = rdat.shape
     if AD:
         lof = LocalOutlierFactor(contamination='auto', n_jobs=THREADS)
-    idat = np.zeros((ned, nbeta, ns), dtype=np.uint16)
+    idat = np.zeros((nfl, nbeta, ns), dtype=np.uint16)
     if VERBOSE:
         print('selecting inlier samples from classification data')
         print(100*'-')
-    for i in tqdm(range(ned), disable=not VERBOSE):
+    for i in tqdm(range(nfl), disable=not VERBOSE):
         for j in tqdm(range(nbeta), disable=not VERBOSE):
                 if AD:
                     fpred = lof.fit_predict(rdat[i, j, :, 0])
@@ -278,17 +349,16 @@ def inlier_selection(dat, intrvl, ns):
                     idat[i, j] = np.random.permutation(rdat[i, j].shape[0])[:ns]
     if VERBOSE:
         print('\n'+100*'-')
-    sldat = np.array([[rdat[i, j, idat[i, j], :] for j in range(nbeta)] for i in range(ned)])
+    sldat = np.array([[rdat[i, j, idat[i, j], :] for j in range(nbeta)] for i in range(nfl)])
     return sldat
 
 
 if __name__ == '__main__':
     # parse command line arguments
     (VERBOSE, PLOT, PARALLEL, GPU, AD, THREADS, NAME, NT, NK,
-     UNI, UNS, SNI, SNS,
+     CD, UNI, UNS, SNI, SNS,
      SCLR, LD, MNFLD, CLST, NC,
      BACKEND, OPT, LSS, EP, LR, SEED) = parse_args()
-    NKS = np.int32(np.sqrt(NK))
     if CLST == 'dbscan':
         NCS = '%.0e' % NC
     else:
@@ -351,33 +421,45 @@ if __name__ == '__main__':
         SCALE = lambda a, b: (a-np.min(b))/(np.max(b)-np.min(b))
         CM = plt.get_cmap('plasma')
 
-    OUTPREF = CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%s.%s.%s.%d' % \
-              (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, MNFLD, CLST, NCS, SEED)
+    OUTPREF = CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%s.%s.%s.%d' % \
+              (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, MNFLD, CLST, NCS, SEED)
     write_specs()
 
     LDIR = os.listdir()
 
     try:
-        CDAT = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.dat.c.npy' % (NAME, NT, NK, SNI, SNS, SEED))
+        CDAT = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%d.dat.c.npy' % (NAME, NT, NK, CD, SNI, SNS, SEED))
         if VERBOSE:
             # print(100*'-')
             print('selected classification samples loaded from file')
             print(100*'-')
     except:
-        DAT = np.load(CWD+'/results/%s.%d.%d.dat.npy' % (NAME, NT, NK))
+        DAT = np.load(CWD+'/results/%s.%d.%d.%d.dat.npy' % (NAME, NT, NK, CD))
         if VERBOSE:
             # print(100*'-')
             print('full dataset loaded from file')
             print(100*'-')
         CDAT = random_selection(DAT, SNI, SNS)
         del DAT
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.dat.c.npy' % (NAME, NT, NK, SNI, SNS, SEED), CDAT)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%d.dat.c.npy' % (NAME, NT, NK, CD, SNI, SNS, SEED), CDAT)
         if VERBOSE:
             print('selected classification samples generated')
             print(100*'-')
-    CFL = np.load(CWD+'/results/%s.%d.%d.tfl.npy' % (NAME, NT, NK))[::SNI]
-    CBETA = np.load(CWD+'/results/%s.%d.%d.tbeta.npy' % (NAME, NT, NK))[::SNI]
+    CFL = np.load(CWD+'/results/%s.%d.%d.%d.tfl.npy' % (NAME, NT, NK, CD))[::SNI]
+    CBETA = np.load(CWD+'/results/%s.%d.%d.%d.tbeta.npy' % (NAME, NT, NK, CD))[::SNI]
     SNFL, SNBETA = CFL.size, CBETA.size
+
+    if CD == 1:
+        NCH = NK
+        SSHP0 = (SNFL, SNBETA, SNS, NT, NCH)
+        SSHP1 = (SNFL*SNBETA*SNS, NT, NCH)
+        SSHP2 = (SNFL*SNBETA*SNS, NT*NCH)
+    if CD == 3:
+        NKS = np.int32(np.sqrt(NK))
+        NCH = 1
+        SSHP0 = (SNFL, SNBETA, SNS, NT, NKS, NKS, NCH)
+        SSHP1 = (SNFL*SNBETA*SNS, NT, NKS, NKS, NCH)
+        SSHP2 = (SNFL*SNBETA*SNS, NT*NKS*NKS*NCH)
 
     # scaler dictionary
     SCLRS = {'minmax':MinMaxScaler(feature_range=(0, 1)),
@@ -386,23 +468,17 @@ if __name__ == '__main__':
              'tanh':TanhScaler()}
 
     try:
-        SCDAT = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%d.dmp.sc.npy' \
-                        % (NAME, NT, NK, SNI, SNS, SCLR, SEED)).reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
+        SCDAT = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%d.dmp.sc.npy' \
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, SEED)).reshape(*SSHP1)
         if VERBOSE:
             print('scaled selected classification samples loaded from file')
             print(100*'-')
     except:
-        CDAT = CDAT[:, :, :, :, :, np.newaxis]
-        if SCLR == 'glbl':
-            SCDAT = CDAT.reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
-            for i in range(NKS):
-                for j in range(NKS):
-                    TMIN, TMAX = SCDAT[:, :, :, :, i, j].min(), SCDAT[:, :, :, :, i, j].max()
-                    SCDAT[:, :, :, :, i, j] = (SCDAT[:, :, :, :, i, j]-TMIN)/(TMAX-TMIN)
-            del TMIN, TMAX
+        if SCLR == 'none':
+            SCDAT = CDAT.reshape(*SSHP0)
         else:
-            SCDAT = SCLRS[SCLR].fit_transform(CDAT.reshape(SNFL*SNBETA*SNS, NT*NK)).reshape(SNFL*SNBETA*SNS, NT, NKS, NKS)
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%d.dmp.sc.npy' % (NAME, NT, NK, SNI, SNS, SCLR, SEED), SCDAT.reshape(SNFL, SNBETA, SNS, NT, NKS, NKS))
+            SCDAT = SCLRS[SCLR].fit_transform(CDAT.reshape(*SSHP2)).reshape(*SSHP1)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%d.dmp.sc.npy' % (NAME, NT, NK, CD, SNI, SNS, SCLR, SEED), SCDAT.reshape(*SSHP0))
         if VERBOSE:
             print('scaled selected classification samples computed')
             print(100*'-')
@@ -412,15 +488,18 @@ if __name__ == '__main__':
             'adam': Adam(lr=LR, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=True),
             'nadam': Nadam(lr=LR, beta_1=0.9, beta_2=0.999, epsilon=None, schedule_decay=0.004)}
 
-    ENC, DEC, VAE = build_variational_autoencoder()
+    if CD == 1:
+        ENC, DEC, VAE = build_variational_autoencoder_1d()
+    if CD == 3:
+        ENC, DEC, VAE = build_variational_autoencoder_3d()
 
     try:
-        VAE.load_weights(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.wt.h5' \
-                         % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), by_name=True)
-        TLOSS = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.trn.npy' \
-                        % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
-        VLOSS = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.val.npy' \
-                        % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        VAE.load_weights(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.wt.h5' \
+                         % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), by_name=True)
+        TLOSS = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.trn.npy' \
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        VLOSS = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.val.npy' \
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
         if VERBOSE:
             print('variational autoencoder trained weights loaded from file')
             print(100*'-')
@@ -428,8 +507,8 @@ if __name__ == '__main__':
         if VERBOSE:
             print('variational autoencoder training on scaled selected classification samples')
             print(100*'-')
-        CSVLG = CSVLogger(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.log.csv'
-                          % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), append=True, separator=',')
+        CSVLG = CSVLogger(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.log.csv'
+                          % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), append=True, separator=',')
         LR_DECAY = ReduceLROnPlateau(monitor='val_loss', patience=8, verbose=VERBOSE)
         TRN, VAL = train_test_split(SCDAT, test_size=0.25, shuffle=True)
         VAE.fit(x=TRN, y=None, validation_data=(VAL, None), epochs=EP, batch_size=64,
@@ -437,12 +516,12 @@ if __name__ == '__main__':
         del TRN, VAL
         TLOSS = VAE.history.history['loss']
         VLOSS = VAE.history.history['val_loss']
-        VAE.save_weights(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.wt.h5'
-                         % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.trn.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), TLOSS)
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.val.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), VLOSS)
+        VAE.save_weights(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.wt.h5'
+                         % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.trn.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), TLOSS)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.vae.loss.val.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), VLOSS)
         if VERBOSE:
             print(100*'-')
             print('variational autoencoder weights trained')
@@ -467,10 +546,10 @@ if __name__ == '__main__':
         out.write(100*'-' + '\n')
 
     try:
-        ZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.npy'
-                       % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)).reshape(SNFL*SNBETA*SNS, 2, LD)
-        ERR = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.err.npy'
-                       % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        ZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.npy'
+                       % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)).reshape(SNFL*SNBETA*SNS, 2, LD)
+        ERR = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.err.npy'
+                       % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
         # del SCDAT
         if VERBOSE:
             print('z encodings of scaled selected classification samples loaded from file')
@@ -486,10 +565,10 @@ if __name__ == '__main__':
         ZENC = np.swapaxes(ZENC, 0, 1)[:, :2, :]
         ZENC[:, 1, :] = np.exp(0.5*ZENC[:, 1, :])
         # del SCDAT
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), ZENC.reshape(SNFL, SNBETA, SNS, 2, LD))
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.err.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), ERR)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), ZENC.reshape(SNFL, SNBETA, SNS, 2, LD))
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.err.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), ERR)
         if VERBOSE:
             print(100*'-')
             print('z encodings of scaled selected classification samples predicted')
@@ -498,12 +577,12 @@ if __name__ == '__main__':
             print(100*'-')
 
     try:
-        PZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.prj.npy'
-                        % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)).reshape(SNFL*SNBETA*SNS, 2, LD)
-        CZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.cmp.npy'
-                        % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
-        VZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.var.npy'
-                        % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        PZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.prj.npy'
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)).reshape(SNFL*SNBETA*SNS, 2, LD)
+        CZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.cmp.npy'
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
+        VZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.var.npy'
+                        % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED))
         if VERBOSE:
             print('pca projections of z encodings  loaded from file')
             print(100*'-')
@@ -519,12 +598,12 @@ if __name__ == '__main__':
             PZENC[:, i, :] = PCAZENC.fit_transform(ZENC[:, i, :])
             CZENC[i, :, :] = PCAZENC.components_
             VZENC[i, :] = PCAZENC.explained_variance_ratio_
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.prj.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), PZENC.reshape(SNFL, SNBETA, SNS, 2, LD))
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.cmp.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), CZENC)
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.var.npy'
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), VZENC)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.prj.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), PZENC.reshape(SNFL, SNBETA, SNS, 2, LD))
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.cmp.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), CZENC)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.zenc.pca.var.npy'
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED), VZENC)
 
     if VERBOSE:
         print('pca fit information')
@@ -564,8 +643,8 @@ if __name__ == '__main__':
             out.write(100*'-'+'\n')
 
     def vae_plots():
-        outpref = CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d' % \
-                  (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)
+        outpref = CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d' % \
+                  (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, SEED)
 
         fig = plt.figure()
         ax = fig.add_subplot(111)
@@ -595,7 +674,8 @@ if __name__ == '__main__':
         plt.close()
 
         DIAGMLV = SCLRS['minmax'].fit_transform(np.mean(ZENC.reshape(SNFL, SNBETA, SNS, 2*LD), 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
-        DIAGSLV = SCLRS['minmax'].fit_transform(np.var(ZENC.reshape(SNFL, SNBETA, SNS, 2*LD)/CBETA[np.newaxis, :, np.newaxis, np.newaxis], 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
+        DIAGSLV = SCLRS['minmax'].fit_transform(np.var(ZENC.reshape(SNFL, SNBETA, SNS, 2*LD)/\
+                                                CBETA[np.newaxis, :, np.newaxis, np.newaxis], 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
 
         DIAGMPLV = SCLRS['minmax'].fit_transform(np.mean(PZENC.reshape(SNFL, SNBETA, SNS, 2*LD), 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
         for i in range(LD):
@@ -603,7 +683,8 @@ if __name__ == '__main__':
                 DIAGMPLV[:, :, 0, i] = 1-DIAGMPLV[:, :, 0, i]
             if DIAGMPLV[int(SNFL/2), 0, 1, i] > DIAGMPLV[int(SNFL/2), -1, 1, i]:
                 DIAGMPLV[:, :, 1, i] = 1-DIAGMPLV[:, :, 1, i]
-        DIAGSPLV = SCLRS['minmax'].fit_transform(np.var(PZENC.reshape(SNFL, SNBETA, SNS, 2*LD)/CBETA[np.newaxis, :, np.newaxis, np.newaxis], 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
+        DIAGSPLV = SCLRS['minmax'].fit_transform(np.var(PZENC.reshape(SNFL, SNBETA, SNS, 2*LD)/\
+                                                 CBETA[np.newaxis, :, np.newaxis, np.newaxis], 2).reshape(SNFL*SNBETA, 2*LD)).reshape(SNFL, SNBETA, 2, LD)
 
         for i in range(2):
             for j in range(2):
@@ -654,16 +735,16 @@ if __name__ == '__main__':
         vae_plots()
 
     try:
-        SLPZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%d.zenc.pca.prj.inl.npy' \
-                          % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, SEED))
+        SLPZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%d.zenc.pca.prj.inl.npy' \
+                          % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, SEED))
         # del PZENC, CZENC, VZENC, CDAT
         if VERBOSE:
             print('inlier selected z encodings loaded from file')
             print(100*'-')
     except:
         SLPZENC = inlier_selection(PZENC.reshape(SNFL, SNBETA, SNS, 2, LD), UNI, UNS)
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%d.zenc.pca.prj.inl.npy' \
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, SEED), SLPZENC)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%d.zenc.pca.prj.inl.npy' \
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, SEED), SLPZENC)
         # del PZENC, CZENC, VZENC, CDAT
         if VERBOSE:
             print('inlier selected z encodings computed')
@@ -682,8 +763,8 @@ if __name__ == '__main__':
                           verbose=VERBOSE, n_jobs=THREADS)}
 
     try:
-        MSLZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%s.%d.%d.zenc.mfld.inl.npy' \
-                          % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, MNFLD, AD, SEED))
+        MSLZENC = np.load(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%s.%d.%d.zenc.mfld.inl.npy' \
+                          % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, MNFLD, AD, SEED))
         if VERBOSE:
             print('inlier selected z encoding manifold loaded from file')
             print(100*'-')
@@ -691,8 +772,8 @@ if __name__ == '__main__':
         MSLZENC = np.zeros((UNFL*UNBETA*UNS, 2, 2))
         for i in range(ED):
             MSLZENC[:, i, :] = MNFLDS[MNFLD].fit_transform(SLPZENC[:, :, :, i, :].reshape(UNFL*UNBETA*UNS, LD))
-        np.save(CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%s.%d.%d.zenc.mfld.inl.npy' \
-                % (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, MNFLD, AD, SEED), MSLZENC)
+        np.save(CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%s.%d.%d.zenc.mfld.inl.npy' \
+                % (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, MNFLD, AD, SEED), MSLZENC)
         if VERBOSE:
             if MNFLD == 'tsne':
                 print(100*'-')
@@ -700,8 +781,8 @@ if __name__ == '__main__':
             print(100*'-')
 
     if PLOT:
-        outpref = CWD+'/results/%s.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%s.%d' % \
-                  (NAME, NT, NK, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, MNFLD, SEED)
+        outpref = CWD+'/results/%s.%d.%d.%d.%d.%d.%s.%s.%s.%d.%d.%.0e.%d.%d.%d.%s.%d' % \
+                  (NAME, NT, NK, CD, SNI, SNS, SCLR, OPT, LSS, LD, EP, LR, UNI, UNS, AD, MNFLD, SEED)
         for i in range(2):
             fig = plt.figure()
             ax = fig.add_subplot(111)
