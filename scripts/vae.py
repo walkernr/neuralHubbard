@@ -197,7 +197,7 @@ def build_variational_autoencoder_1d():
                    kernel_initializer='he_normal', padding='same', strides=2)(conv2)
     shape = K.int_shape(conv3)
     fconv3 = Flatten()(conv3)
-    d0 = Dense(1024, activation='relu')(fconv3)
+    d0 = Dense(LD, activation='relu')(fconv3)
     z_mean = Dense(LD, name='z_mean')(d0)
     z_log_var = Dense(LD, name='z_log_std')(d0) # more numerically stable to use log(var_z)
     z = Lambda(gauss_sampling, output_shape=(LD,), name='z')([z_mean, z_log_var])
@@ -213,13 +213,13 @@ def build_variational_autoencoder_1d():
     d1 = Dense(np.prod(shape[1:]), activation='relu')(latent_input)
     rd1 = Reshape(shape[1:])(d1)
     convt0 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=2)(rd1)
+                             kernel_initializer='he_normal', padding='same', strides=1)(rd1)
     convt1 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=1)(convt0)
+                             kernel_initializer='he_normal', padding='same', strides=2)(convt0)
     convt2 = Conv1DTranspose(filters=64, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=2)(convt1)
+                             kernel_initializer='he_normal', padding='same', strides=1)(convt1)
     convt3 = Conv1DTranspose(filters=32, kernel_size=3, activation='relu',
-                             kernel_initializer='he_normal', padding='same', strides=1)(convt2)
+                             kernel_initializer='he_normal', padding='same', strides=2)(convt2)
     output = Conv1DTranspose(filters=NK, kernel_size=3, activation='sigmoid',
                              kernel_initializer='he_normal', padding='same', name='decoder_output')(convt3)
     # construct decoder
