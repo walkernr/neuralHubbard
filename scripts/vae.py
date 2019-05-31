@@ -235,7 +235,7 @@ def build_variational_autoencoder_1d():
     reconstruction_losses = {'bc': lambda a, b: binary_crossentropy(a, b),
                              'mse': lambda a, b: mse(a, b)}
     # vae loss
-    reconstruction_loss = NT*reconstruction_losses[LSS](K.flatten(input), K.flatten(output))
+    reconstruction_loss = NT*NK*reconstruction_losses[LSS](K.flatten(input), K.flatten(output))
     kl_loss = -0.5*K.sum(1+z_log_var-K.square(z_mean)-K.exp(z_log_var), axis=-1)
     vae_loss = K.mean(reconstruction_loss+kl_loss)
     vae.add_loss(vae_loss)
@@ -299,7 +299,7 @@ def build_variational_autoencoder_3d():
     reconstruction_losses = {'bc': lambda a, b: binary_crossentropy(a, b),
                              'mse': lambda a, b: mse(a, b)}
     # vae loss
-    reconstruction_loss = NT*reconstruction_losses[LSS](K.flatten(input), K.flatten(output))
+    reconstruction_loss = NT*NKS*NKS*reconstruction_losses[LSS](K.flatten(input), K.flatten(output))
     kl_loss = -0.5*K.sum(1+z_log_var-K.square(z_mean)-K.exp(z_log_var), axis=-1)
     vae_loss = K.mean(reconstruction_loss+kl_loss)
     vae.add_loss(vae_loss)

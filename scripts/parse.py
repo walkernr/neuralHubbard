@@ -74,6 +74,13 @@ print('parsing data files')
 for i in tqdm(range(NFL)):
     for j in tqdm(range(NBETA)):
         DAT[i, j], FL[i, j], BETA[i, j] = read_file(DATFLS[i][j])
+
+ORDR = [np.argsort(BETA[i, :]) for i in range(NFL)]
+for i in range(NFL):
+    DAT[i] = DAT[i, ORDR[i]]
+    FL[i] = FL[i, ORDR[i]]
+    BETA[i] = BETA[i, ORDR[i]]
+
 TFL = np.array([SFL[i][1:] for i in range(NFL)]).astype(np.float32)/1e2
 TBETA = BETA[0]
 
